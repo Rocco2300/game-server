@@ -3,7 +3,6 @@ package main
 import (
 	"encoding/json"
 	"errors"
-	"fmt"
 	"log"
 	"net"
 	"sync"
@@ -61,13 +60,17 @@ func main() {
 		}
 
 		response := ConnectionResponse{}
-		if _, exists := server.Connections.Load(request.Username); !exists {
-			response, err = handleConnectionRequest(request, raddr)
+		_, exists := server.Connections.Load(request.Username)
+		if !exists {
+			response, err = connectPlayer(request, raddr)
 
 			if err != nil {
 				log.Println(err)
-				log.Println("error in resolving request")
+				log.Println("error in connecting player", request.Username)
 			}
+		} else if exists {
+			// handle messages
+			// handle connection request to connected user
 		}
 
 		buf, err = json.Marshal(response)
@@ -84,19 +87,7 @@ func main() {
 	}
 }
 
-func handleConnectionRequest(request ConnectionRequest, raddr net.Addr) (ConnectionResponse, error) {
-	response, err := handleConnectionResponse(request, raddr)
-	if err != nil {
-		log.Println(err)
-
-		errBuf := fmt.Sprintf("failed to resolve player", request.Username, "connection")
-		return response, errors.New(errBuf)
-	}
-
-	return response, nil
-}
-
-func handleConnectionResponse(request ConnectionRequest, raddr net.Addr) (ConnectionResponse, error) {
+func connectPlayer(request ConnectionRequest, raddr net.Addr) (ConnectionResponse, error) {
 	response := ConnectionResponse{}
 	_, exists := server.Rooms.Load(request.RoomId)
 	if request.Hosting && !exists {
@@ -105,16 +96,12 @@ func handleConnectionResponse(request ConnectionRequest, raddr net.Addr) (Connec
 	} else if request.Hosting && exists {
 		response.Success = false
 		response.ErrorMessage = "room already exists"
-
-		log.Println("couldn't connect ", request.Username)
 		return response, errors.New("room already exists")
 	} else if !request.Hosting && exists {
 		response.Success = true
 	} else if !request.Hosting && !exists {
 		response.Success = false
 		response.ErrorMessage = "room doesn't exist"
-
-		log.Println("couldn't connect ", request.Username)
 		return response, errors.New("room doesn't exist")
 	}
 
