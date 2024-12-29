@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"log"
 	"net"
+	"os"
 )
 
 type PlayerData struct {
@@ -20,16 +21,26 @@ func main() {
 	defer conn.Close()
 
 	data := PlayerData{}
-	data.Username = "Rocco"
-	data.RoomId = "asdfasdfasdf"
-	data.Hosting = true
+	data.Username = os.Args[1]
+	data.RoomId = os.Args[2]
+	if os.Args[3] == "-h" {
+		data.Hosting = true
+	} else {
+		data.Hosting = false
+	}
 
 	buf, err := json.Marshal(data)
 	if err != nil {
 		log.Fatal(err)
 	}
 
-	conn.Write(buf)
+	n, err := conn.Write(buf)
+	if err != nil {
+		log.Println(err)
+		return
+	}
+	log.Println("wrote", n, "bytes.")
+
 	for {
 		buffer := make([]byte, 4096)
 		n, err := conn.Read(buffer)
