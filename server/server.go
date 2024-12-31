@@ -3,9 +3,22 @@ package server
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log"
 	"net"
 )
+
+type requestType int
+
+const (
+	conn requestType = iota
+	posUpdate
+)
+
+var requestStringToEnum = map[string]requestType{
+	"connection":     conn,
+	"positionUpdate": posUpdate,
+}
 
 type connectionRequest struct {
 	Username string `json:"username"`
@@ -18,9 +31,24 @@ type connectionResponse struct {
 	ErrorMessage string `json:"errorMessage"`
 }
 
+type position struct {
+	X float32 `json:"x"`
+	Y float32 `json:"y"`
+}
+
+type playerPositionUpdate struct {
+	Username string   `json:"username"`
+	Position position `json:"position"`
+}
+
 type playerConn struct {
 	username string
 	addr     net.Addr
+}
+
+type request struct {
+	Type string `json:"type"`
+	Data any    `json:"data"`
 }
 
 type Server struct {
@@ -61,65 +89,144 @@ func (server *Server) Serve() {
 		}
 		log.Println("read", n, "bytes.")
 
-		request := connectionRequest{}
-		err = json.Unmarshal(buf[:n], &request)
+		reqType, err := server.getRequestType(buf, n)
 		if err != nil {
 			log.Println(err)
 			continue
 		}
 
-		response := connectionResponse{}
-		_, exists := server.findPlayer(request.Username)
-		if !exists {
-			response, err = server.connectPlayer(request, raddr)
+		request := request{}
+		server.buildRequest(&request, reqType)
+		err = json.Unmarshal(buf[:n], &request)
+		if err != nil {
+			log.Println("error in parsing request")
+			continue
+		}
+
+		switch reqType {
+		case conn:
+			err := server.handleConnRequest(request.Data.(*connectionRequest), raddr)
 			if err != nil {
 				log.Println(err)
-				log.Println("error in connecting player", request.Username)
 			}
-		} else {
-			response.Success = false
-			response.ErrorMessage = "user already connected"
-			log.Println("user already connected")
-		}
-
-		buf, err = json.Marshal(response)
-		if err != nil {
-			log.Println(err)
-			log.Println("couldn't marshal response data to string. \n", err)
-		}
-
-		_, err = server.listener.WriteTo(buf, raddr)
-		if err != nil {
-			// something about dissconnect
-			log.Println("could not respond to user...")
+		case posUpdate:
+			err := server.handlePosUpdate(request.Data.(*playerPositionUpdate))
+			if err != nil {
+				log.Println(err)
+			}
 		}
 	}
 }
 
-func (server *Server) connectPlayer(request connectionRequest, raddr net.Addr) (connectionResponse, error) {
+func (server *Server) getRequestType(buf []byte, n int) (requestType, error) {
+	var outer struct {
+		Type string `json:"type"`
+	}
+
+	err := json.Unmarshal(buf[:n], &outer)
+	if err != nil {
+		log.Println("could not get request type")
+		log.Println(err)
+
+		return conn, errors.New("could not get request type")
+	}
+	fmt.Printf("request type %s\n", outer.Type)
+
+	reqTypeStr := requestStringToEnum[outer.Type]
+	return reqTypeStr, nil
+}
+
+func (server *Server) buildRequest(request *request, requestType requestType) {
+	switch requestType {
+	case conn:
+		request.Data = new(connectionRequest)
+	case posUpdate:
+		request.Data = new(playerPositionUpdate)
+	}
+}
+
+func (server *Server) handleConnRequest(request *connectionRequest, raddr net.Addr) error {
+	err := errors.New("")
+	response := connectionResponse{}
+	_, exists := server.findPlayer(request.Username)
+	if !exists {
+		response, err = server.connectPlayer(request, raddr)
+		if err != nil {
+			errMsg := fmt.Sprintf("error in connecting %s", request.Username)
+
+			log.Println(err)
+			return errors.New(errMsg)
+		}
+	} else {
+		errMsg := fmt.Sprintf("user %s already connected", request.Username)
+
+		response.Success = false
+		response.ErrorMessage = errMsg
+		return errors.New(errMsg)
+	}
+
+	buf, err := json.Marshal(response)
+	if err != nil {
+		log.Println(err)
+		return errors.New("couldn't marshal response data to string")
+	}
+
+	_, err = server.listener.WriteTo(buf, raddr)
+	if err != nil {
+		errMsg := fmt.Sprintf("could not respond to user %s", request.Username)
+		// something about disconnect
+		log.Println(err)
+		return errors.New(errMsg)
+	}
+
+	return nil
+}
+
+func (server *Server) handlePosUpdate(request *playerPositionUpdate) error {
+	buf, err := json.Marshal(request)
+	if err != nil {
+		return errors.New("error in building broadcast player postion update message")
+	}
+
+	for _, playerConn := range server.sessions {
+
+		server.listener.WriteTo(buf, playerConn.addr)
+	}
+
+	return nil
+}
+
+func (server *Server) connectPlayer(request *connectionRequest, raddr net.Addr) (connectionResponse, error) {
 	response := connectionResponse{}
 
 	if server.playerCount == 2 {
 		response.Success = false
-		response.ErrorMessage = "too may players connected"
+		response.ErrorMessage = "too many players connected"
+		return response, errors.New("too many players connected")
 	}
 
 	if request.Hosting && server.room != "" {
+		errMsg := fmt.Sprintf("room %s already created", request.RoomId)
+
 		response.Success = false
-		response.ErrorMessage = "room already created"
-		return response, errors.New("room already created")
+		response.ErrorMessage = errMsg
+		return response, errors.New(errMsg)
 	}
 
 	if !request.Hosting && server.room == "" {
+		errMsg := fmt.Sprintf("room %s already created", request.RoomId)
+
 		response.Success = false
-		response.ErrorMessage = "room not hosted"
-		return response, errors.New("room not hosted")
+		response.ErrorMessage = errMsg
+		return response, errors.New(errMsg)
 	}
 
 	if !request.Hosting && server.room != request.RoomId {
+		errMsg := fmt.Sprintf("room %s doesn't exist", request.RoomId)
+
 		response.Success = false
-		response.ErrorMessage = "room doesn't exist"
-		return response, errors.New("room doesn't exist")
+		response.ErrorMessage = errMsg
+		return response, errors.New(errMsg)
 	}
 
 	if request.Hosting {
