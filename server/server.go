@@ -47,8 +47,13 @@ type playerConn struct {
 }
 
 type request struct {
+	Type string          `json:"type"`
+	Data json.RawMessage `json:"data"`
+}
+
+type response struct {
 	Type string `json:"type"`
-	Data any    `json:"data"`
+	Data string `json:"data"`
 }
 
 type Server struct {
@@ -96,24 +101,19 @@ func (server *Server) Serve() {
 		}
 
 		request := request{}
-		server.buildRequest(&request, reqType)
 		err = json.Unmarshal(buf[:n], &request)
 		if err != nil {
 			log.Println("error in parsing request")
+			log.Println(err)
 			continue
 		}
 
+		requestData := server.buildRequest(request.Data, reqType)
 		switch reqType {
 		case conn:
-			err := server.handleConnRequest(request.Data.(*connectionRequest), raddr)
-			if err != nil {
-				log.Println(err)
-			}
+			server.handleConnRequest(requestData.(connectionRequest), raddr)
 		case posUpdate:
-			err := server.handlePosUpdate(request.Data.(*playerPositionUpdate))
-			if err != nil {
-				log.Println(err)
-			}
+			server.handlePosUpdate(requestData.(playerPositionUpdate))
 		}
 	}
 }
@@ -136,39 +136,71 @@ func (server *Server) getRequestType(buf []byte, n int) (requestType, error) {
 	return reqTypeStr, nil
 }
 
-func (server *Server) buildRequest(request *request, requestType requestType) {
+func (server *Server) buildRequest(data json.RawMessage, requestType requestType) any {
 	switch requestType {
 	case conn:
-		request.Data = new(connectionRequest)
+		var rawData string
+		err := json.Unmarshal(data, &rawData)
+		if err != nil {
+			log.Println(err)
+		}
+
+		var req connectionRequest
+		err = json.Unmarshal([]byte(rawData), &req)
+		if err != nil {
+			log.Println(err)
+		}
+
+		return req
 	case posUpdate:
-		request.Data = new(playerPositionUpdate)
+		var rawData string
+		err := json.Unmarshal(data, &rawData)
+		if err != nil {
+			log.Println(err)
+		}
+
+		var req playerPositionUpdate
+		err = json.Unmarshal([]byte(rawData), &req)
+		if err != nil {
+			log.Println(err)
+		}
+
+		return req
 	}
+
+	return nil
 }
 
-func (server *Server) handleConnRequest(request *connectionRequest, raddr net.Addr) error {
+func (server *Server) handleConnRequest(request connectionRequest, raddr net.Addr) {
 	err := errors.New("")
-	response := connectionResponse{}
+	connResponse := connectionResponse{}
 	_, exists := server.findPlayer(request.Username)
 	if !exists {
-		response, err = server.connectPlayer(request, raddr)
+		connResponse, err = server.connectPlayer(request, raddr)
 		if err != nil {
 			errMsg := fmt.Sprintf("error in connecting %s", request.Username)
 
 			log.Println(err)
-			return errors.New(errMsg)
+			log.Println(errMsg)
 		}
 	} else {
 		errMsg := fmt.Sprintf("user %s already connected", request.Username)
-
-		response.Success = false
-		response.ErrorMessage = errMsg
-		return errors.New(errMsg)
+		log.Println(errMsg)
 	}
 
+	connResponseJSON, err := json.Marshal(connResponse)
+	if err != nil {
+		log.Println(err)
+		log.Println("could not marshal response data string")
+	}
+
+	response := response{}
+	response.Type = "connection"
+	response.Data = string(connResponseJSON)
 	buf, err := json.Marshal(response)
 	if err != nil {
 		log.Println(err)
-		return errors.New("couldn't marshal response data to string")
+		log.Println("could not marshal response")
 	}
 
 	_, err = server.listener.WriteTo(buf, raddr)
@@ -176,27 +208,26 @@ func (server *Server) handleConnRequest(request *connectionRequest, raddr net.Ad
 		errMsg := fmt.Sprintf("could not respond to user %s", request.Username)
 		// something about disconnect
 		log.Println(err)
-		return errors.New(errMsg)
+		log.Println(errMsg)
 	}
-
-	return nil
 }
 
-func (server *Server) handlePosUpdate(request *playerPositionUpdate) error {
+func (server *Server) handlePosUpdate(request playerPositionUpdate) {
 	buf, err := json.Marshal(request)
 	if err != nil {
-		return errors.New("error in building broadcast player postion update message")
+		log.Println("error in building broadcast player postion update message")
 	}
 
 	for _, playerConn := range server.sessions {
+		if playerConn == nil {
+			continue
+		}
 
 		server.listener.WriteTo(buf, playerConn.addr)
 	}
-
-	return nil
 }
 
-func (server *Server) connectPlayer(request *connectionRequest, raddr net.Addr) (connectionResponse, error) {
+func (server *Server) connectPlayer(request connectionRequest, raddr net.Addr) (connectionResponse, error) {
 	response := connectionResponse{}
 
 	if server.playerCount == 2 {
