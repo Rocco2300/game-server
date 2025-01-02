@@ -27,6 +27,7 @@ type connectionRequest struct {
 }
 
 type connectionResponse struct {
+	Username     string `json:"username"`
 	Success      bool   `json:"success"`
 	ErrorMessage string `json:"errorMessage"`
 }
@@ -34,6 +35,11 @@ type connectionResponse struct {
 type position struct {
 	X float32 `json:"x"`
 	Y float32 `json:"y"`
+}
+
+type spawnCommand struct {
+	Username string   `json:"username"`
+	Position position `json:"position"`
 }
 
 type playerPositionUpdate struct {
@@ -92,7 +98,6 @@ func (server *Server) Serve() {
 			log.Println(err)
 			continue
 		}
-		log.Println("read", n, "bytes.")
 
 		reqType, err := server.getRequestType(buf, n)
 		if err != nil {
@@ -130,7 +135,6 @@ func (server *Server) getRequestType(buf []byte, n int) (requestType, error) {
 
 		return conn, errors.New("could not get request type")
 	}
-	fmt.Printf("request type %s\n", outer.Type)
 
 	reqTypeStr := requestStringToEnum[outer.Type]
 	return reqTypeStr, nil
@@ -210,12 +214,31 @@ func (server *Server) handleConnRequest(request connectionRequest, raddr net.Add
 		log.Println(err)
 		log.Println(errMsg)
 	}
+
+	if !connResponse.Success {
+		return
+	}
+
+	if server.playerCount < 2 {
+		return
+	}
+
+	server.spawnPlayers()
+	server.spawnCoins()
 }
 
 func (server *Server) handlePosUpdate(request playerPositionUpdate) {
 	buf, err := json.Marshal(request)
 	if err != nil {
 		log.Println("error in building broadcast player postion update message")
+	}
+
+	var response response
+	response.Type = "positionUpdate"
+	response.Data = string(buf)
+	buf, err = json.Marshal(response)
+	if err != nil {
+		log.Println("error in building broadcast player position update message")
 	}
 
 	for _, playerConn := range server.sessions {
@@ -225,6 +248,46 @@ func (server *Server) handlePosUpdate(request playerPositionUpdate) {
 
 		server.listener.WriteTo(buf, playerConn.addr)
 	}
+}
+
+func (server *Server) spawnPlayers() {
+	var pos float32 = -1.0
+	for _, player := range server.sessions {
+		var spawnCommand spawnCommand
+		spawnCommand.Username = player.username
+		spawnCommand.Position.X = pos
+		spawnCommand.Position.Y = 0.0
+
+		spawnCommandJson, err := json.Marshal(spawnCommand)
+		if err != nil {
+			log.Println(err)
+			return
+		}
+
+		var response response
+		response.Type = "spawn"
+		response.Data = string(spawnCommandJson)
+
+		responseJson, err := json.Marshal(response)
+		if err != nil {
+			log.Println(err)
+			return
+		}
+
+		for _, playerConn := range server.sessions {
+			if playerConn == nil {
+				continue
+			}
+
+			server.listener.WriteTo(responseJson, playerConn.addr)
+		}
+
+		pos += 2
+	}
+}
+
+func (serve *Server) spawnCoins() {
+
 }
 
 func (server *Server) connectPlayer(request connectionRequest, raddr net.Addr) (connectionResponse, error) {
@@ -271,6 +334,7 @@ func (server *Server) connectPlayer(request connectionRequest, raddr net.Addr) (
 	server.sessions[server.playerCount] = playerConn
 	server.playerCount++
 
+	response.Username = request.Username
 	response.Success = true
 	response.ErrorMessage = ""
 
