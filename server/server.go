@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"math/rand/v2"
 	"net"
 )
 
@@ -13,11 +14,13 @@ type requestType int
 const (
 	conn requestType = iota
 	posUpdate
+	collected
 )
 
 var requestStringToEnum = map[string]requestType{
 	"connection":     conn,
 	"positionUpdate": posUpdate,
+	"coinCollected":  collected,
 }
 
 type connectionRequest struct {
@@ -62,11 +65,25 @@ type response struct {
 	Data string `json:"data"`
 }
 
+type coin struct {
+	Id       int      `json:"id"`
+	Position position `json:"position"`
+}
+
+type coinCollected struct {
+	Id       int    `json:"id"`
+	Username string `json"username"`
+}
+
 type Server struct {
+	listener *net.UDPConn
+
 	room        string
 	sessions    [2]*playerConn
-	listener    *net.UDPConn
 	playerCount int
+
+	coins  [5]*coin
+	coinId int
 }
 
 func Init(port int) Server {
@@ -86,6 +103,7 @@ func Init(port int) Server {
 	server.room = string("")
 	server.listener = listener
 	server.playerCount = 0
+	server.coinId = 0
 
 	return server
 }
@@ -119,6 +137,8 @@ func (server *Server) Serve() {
 			server.handleConnRequest(requestData.(connectionRequest), raddr)
 		case posUpdate:
 			server.handlePosUpdate(requestData.(playerPositionUpdate))
+		case collected:
+			server.handleCoinCollected(requestData.(coinCollected))
 		}
 	}
 }
@@ -164,6 +184,20 @@ func (server *Server) buildRequest(data json.RawMessage, requestType requestType
 		}
 
 		var req playerPositionUpdate
+		err = json.Unmarshal([]byte(rawData), &req)
+		if err != nil {
+			log.Println(err)
+		}
+
+		return req
+	case collected:
+		var rawData string
+		err := json.Unmarshal(data, &rawData)
+		if err != nil {
+			log.Println(err)
+		}
+
+		var req coinCollected
 		err = json.Unmarshal([]byte(rawData), &req)
 		if err != nil {
 			log.Println(err)
@@ -250,6 +284,61 @@ func (server *Server) handlePosUpdate(request playerPositionUpdate) {
 	}
 }
 
+func (server *Server) handleCoinCollected(request coinCollected) {
+	buf, err := json.Marshal(request)
+	if err != nil {
+		log.Println("error in building broadcast coin collected")
+	}
+
+	var response response
+	response.Type = "coinCollected"
+	response.Data = string(buf)
+	buf, err = json.Marshal(response)
+	if err != nil {
+		log.Println("error in building broadcast coin collected")
+	}
+
+	for _, playerConn := range server.sessions {
+		if playerConn == nil {
+			continue
+		}
+
+		server.listener.WriteTo(buf, playerConn.addr)
+	}
+
+	for _, coin := range server.coins {
+		if coin.Id == request.Id {
+			coin.Id = server.coinId
+			coin.Position.X = rand.Float32()*10 - 5
+			coin.Position.Y = rand.Float32()*10 - 5
+
+			buf, err = json.Marshal(coin)
+			if err != nil {
+				log.Println("could not marshal new coin spawn after collect data")
+				log.Println(err)
+			}
+
+			response.Type = "coin"
+			response.Data = string(buf)
+			buf, err = json.Marshal(response)
+			if err != nil {
+				log.Println("could not marshal new coin spawn after collect response")
+				log.Println(err)
+			}
+
+			server.coinId++
+		}
+	}
+
+	for _, playerConn := range server.sessions {
+		if playerConn == nil {
+			continue
+		}
+
+		server.listener.WriteTo(buf, playerConn.addr)
+	}
+}
+
 func (server *Server) spawnPlayers() {
 	var pos float32 = -1.0
 	for _, player := range server.sessions {
@@ -286,8 +375,37 @@ func (server *Server) spawnPlayers() {
 	}
 }
 
-func (serve *Server) spawnCoins() {
+func (server *Server) spawnCoins() {
+	for i := 0; i < 5; i++ {
+		server.coins[i] = new(coin)
+		server.coins[i].Id = server.coinId
+		server.coins[i].Position.X = rand.Float32()*10 - 5
+		server.coins[i].Position.Y = rand.Float32()*10 - 5
 
+		server.coinId++
+	}
+
+	for _, coin := range server.coins {
+		for _, playerConn := range server.sessions {
+			coinJson, err := json.Marshal(coin)
+			if err != nil {
+				log.Println(err)
+				return
+			}
+
+			response := response{}
+			response.Type = "coin"
+			response.Data = string(coinJson)
+
+			responseJson, err := json.Marshal(response)
+			if err != nil {
+				log.Println(err)
+				return
+			}
+
+			server.listener.WriteTo(responseJson, playerConn.addr)
+		}
+	}
 }
 
 func (server *Server) connectPlayer(request connectionRequest, raddr net.Addr) (connectionResponse, error) {
