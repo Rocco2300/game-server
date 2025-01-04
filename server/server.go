@@ -285,15 +285,17 @@ func (server *Server) handlePosUpdate(request playerPositionUpdate) {
 }
 
 func (server *Server) handleCoinCollected(request coinCollected) {
-	buf, err := json.Marshal(request)
+	requestBuf, err := json.Marshal(request)
 	if err != nil {
 		log.Println("error in building broadcast coin collected")
 	}
 
+	log.Println(request.Username, "collected coin")
+
 	var response response
 	response.Type = "coinCollected"
-	response.Data = string(buf)
-	buf, err = json.Marshal(response)
+	response.Data = string(requestBuf)
+	responseBuf, err := json.Marshal(response)
 	if err != nil {
 		log.Println("error in building broadcast coin collected")
 	}
@@ -303,7 +305,7 @@ func (server *Server) handleCoinCollected(request coinCollected) {
 			continue
 		}
 
-		server.listener.WriteTo(buf, playerConn.addr)
+		server.listener.WriteTo(responseBuf, playerConn.addr)
 	}
 
 	for _, coin := range server.coins {
@@ -312,30 +314,30 @@ func (server *Server) handleCoinCollected(request coinCollected) {
 			coin.Position.X = rand.Float32()*10 - 5
 			coin.Position.Y = rand.Float32()*10 - 5
 
-			buf, err = json.Marshal(coin)
+			dataBuf, err := json.Marshal(coin)
 			if err != nil {
 				log.Println("could not marshal new coin spawn after collect data")
 				log.Println(err)
 			}
 
 			response.Type = "coin"
-			response.Data = string(buf)
-			buf, err = json.Marshal(response)
+			response.Data = string(dataBuf)
+			spawnBuf, err := json.Marshal(response)
 			if err != nil {
 				log.Println("could not marshal new coin spawn after collect response")
 				log.Println(err)
 			}
 
 			server.coinId++
-		}
-	}
+			for _, playerConn := range server.sessions {
+				if playerConn == nil {
+					continue
+				}
 
-	for _, playerConn := range server.sessions {
-		if playerConn == nil {
-			continue
+				server.listener.WriteTo(spawnBuf, playerConn.addr)
+			}
+			break
 		}
-
-		server.listener.WriteTo(buf, playerConn.addr)
 	}
 }
 
