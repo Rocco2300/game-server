@@ -72,7 +72,7 @@ type coin struct {
 
 type coinCollected struct {
 	Id       int    `json:"id"`
-	Username string `json"username"`
+	Username string `json:"username"`
 }
 
 type Server struct {
@@ -210,8 +210,8 @@ func (server *Server) buildRequest(data json.RawMessage, requestType requestType
 }
 
 func (server *Server) handleConnRequest(request connectionRequest, raddr net.Addr) {
-	err := errors.New("")
-	connResponse := connectionResponse{}
+	var err error
+	var connResponse connectionResponse
 	_, exists := server.findPlayer(request.Username)
 	if !exists {
 		connResponse, err = server.connectPlayer(request, raddr)
