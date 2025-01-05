@@ -7,20 +7,23 @@ import (
 	"log"
 	"math/rand/v2"
 	"net"
+	"time"
 )
 
 type requestType int
 
 const (
 	conn requestType = iota
-	posUpdate
+	playerUpdt
 	collected
+	death
 )
 
 var requestStringToEnum = map[string]requestType{
-	"connection":     conn,
-	"positionUpdate": posUpdate,
-	"coinCollected":  collected,
+	"connection":    conn,
+	"playerUpdate":  playerUpdt,
+	"coinCollected": collected,
+	"playerDeath":   death,
 }
 
 type connectionRequest struct {
@@ -40,13 +43,14 @@ type position struct {
 	Y float32 `json:"y"`
 }
 
-type spawnCommand struct {
+type playerUpdate struct {
 	Username string   `json:"username"`
+	Health   int      `json:"health"`
 	Position position `json:"position"`
 }
 
-type playerPositionUpdate struct {
-	Username string   `json:"username"`
+type zoneSpawn struct {
+	Scale    position `json:"scale"`
 	Position position `json:"position"`
 }
 
@@ -75,6 +79,14 @@ type coinCollected struct {
 	Username string `json:"username"`
 }
 
+type gameOver struct {
+	Username string `json:"username"`
+}
+
+type playerDeath struct {
+	Username string `json:"username"`
+}
+
 type Server struct {
 	listener *net.UDPConn
 
@@ -82,8 +94,10 @@ type Server struct {
 	sessions    [2]*playerConn
 	playerCount int
 
-	coins  [5]*coin
-	coinId int
+	coins          [5]*coin
+	coinId         int
+	collectedCoins [2]int
+	gameOver       bool
 }
 
 func Init(port int) Server {
@@ -104,6 +118,7 @@ func Init(port int) Server {
 	server.listener = listener
 	server.playerCount = 0
 	server.coinId = 0
+	server.gameOver = false
 
 	return server
 }
@@ -135,10 +150,12 @@ func (server *Server) Serve() {
 		switch reqType {
 		case conn:
 			server.handleConnRequest(requestData.(connectionRequest), raddr)
-		case posUpdate:
-			server.handlePosUpdate(requestData.(playerPositionUpdate))
+		case playerUpdt:
+			server.handlePlayerUpdate(requestData.(playerUpdate))
 		case collected:
 			server.handleCoinCollected(requestData.(coinCollected))
+		case death:
+			server.handlePlayerDeath(requestData.(playerDeath))
 		}
 	}
 }
@@ -176,14 +193,14 @@ func (server *Server) buildRequest(data json.RawMessage, requestType requestType
 		}
 
 		return req
-	case posUpdate:
+	case playerUpdt:
 		var rawData string
 		err := json.Unmarshal(data, &rawData)
 		if err != nil {
 			log.Println(err)
 		}
 
-		var req playerPositionUpdate
+		var req playerUpdate
 		err = json.Unmarshal([]byte(rawData), &req)
 		if err != nil {
 			log.Println(err)
@@ -198,6 +215,20 @@ func (server *Server) buildRequest(data json.RawMessage, requestType requestType
 		}
 
 		var req coinCollected
+		err = json.Unmarshal([]byte(rawData), &req)
+		if err != nil {
+			log.Println(err)
+		}
+
+		return req
+	case death:
+		var rawData string
+		err := json.Unmarshal(data, &rawData)
+		if err != nil {
+			log.Println(err)
+		}
+
+		var req playerDeath
 		err = json.Unmarshal([]byte(rawData), &req)
 		if err != nil {
 			log.Println(err)
@@ -259,16 +290,18 @@ func (server *Server) handleConnRequest(request connectionRequest, raddr net.Add
 
 	server.spawnPlayers()
 	server.spawnCoins()
+
+	go server.spawnZones()
 }
 
-func (server *Server) handlePosUpdate(request playerPositionUpdate) {
+func (server *Server) handlePlayerUpdate(request playerUpdate) {
 	buf, err := json.Marshal(request)
 	if err != nil {
 		log.Println("error in building broadcast player postion update message")
 	}
 
 	var response response
-	response.Type = "positionUpdate"
+	response.Type = "playerUpdate"
 	response.Data = string(buf)
 	buf, err = json.Marshal(response)
 	if err != nil {
@@ -300,12 +333,20 @@ func (server *Server) handleCoinCollected(request coinCollected) {
 		log.Println("error in building broadcast coin collected")
 	}
 
-	for _, playerConn := range server.sessions {
+	for index, playerConn := range server.sessions {
 		if playerConn == nil {
 			continue
 		}
 
 		server.listener.WriteTo(responseBuf, playerConn.addr)
+
+		if playerConn.username == request.Username {
+			server.collectedCoins[index]++
+
+			if server.collectedCoins[index] == 10 {
+				server.signalGameOver(playerConn.username)
+			}
+		}
 	}
 
 	for _, coin := range server.coins {
@@ -341,13 +382,75 @@ func (server *Server) handleCoinCollected(request coinCollected) {
 	}
 }
 
+func (server *Server) signalGameOver(username string) {
+	var gameOver gameOver
+	gameOver.Username = username
+	gameOverJson, err := json.Marshal(gameOver)
+	if err != nil {
+		log.Println(err)
+		return
+	}
+
+	var response response
+	response.Type = "gameOver"
+	response.Data = string(gameOverJson)
+	responseJson, err := json.Marshal(response)
+	if err != nil {
+		log.Println(err)
+		return
+	}
+
+	for _, playerConn := range server.sessions {
+		if playerConn == nil {
+			continue
+		}
+
+		server.listener.WriteTo(responseJson, playerConn.addr)
+	}
+
+	server.gameOver = true
+}
+
+func (server *Server) handlePlayerDeath(request playerDeath) {
+	playerDeathJson, err := json.Marshal(request)
+	if err != nil {
+		log.Println(err)
+		return
+	}
+
+	var response response
+	response.Type = "playerDeath"
+	response.Data = string(playerDeathJson)
+	responseJson, err := json.Marshal(response)
+	if err != nil {
+		log.Println(err)
+		return
+	}
+
+	var winningPlayer string
+	for _, playerConn := range server.sessions {
+		if playerConn == nil {
+			continue
+		}
+
+		if playerConn.username != request.Username {
+			winningPlayer = playerConn.username
+		}
+
+		server.listener.WriteTo(responseJson, playerConn.addr)
+	}
+
+	server.signalGameOver(winningPlayer)
+}
+
 func (server *Server) spawnPlayers() {
 	var pos float32 = -1.0
 	for _, player := range server.sessions {
-		var spawnCommand spawnCommand
+		var spawnCommand playerUpdate
 		spawnCommand.Username = player.username
 		spawnCommand.Position.X = pos
 		spawnCommand.Position.Y = 0.0
+		spawnCommand.Health = 100
 
 		spawnCommandJson, err := json.Marshal(spawnCommand)
 		if err != nil {
@@ -406,6 +509,46 @@ func (server *Server) spawnCoins() {
 			}
 
 			server.listener.WriteTo(responseJson, playerConn.addr)
+		}
+	}
+}
+
+func (server *Server) spawnZones() {
+	for {
+		time.Sleep(10 * time.Second)
+
+		if server.gameOver {
+			break
+		}
+
+		var zoneSpawn zoneSpawn
+		zoneSpawn.Scale.X = rand.Float32()*2 + 1
+		zoneSpawn.Scale.Y = rand.Float32()*2 + 1
+		zoneSpawn.Position.X = rand.Float32()*10 - 5
+		zoneSpawn.Position.Y = rand.Float32()*10 - 5
+
+		zoneSpawnJson, err := json.Marshal(zoneSpawn)
+		if err != nil {
+			log.Println(err)
+			return
+		}
+
+		var response response
+		response.Type = "zoneSpawn"
+		response.Data = string(zoneSpawnJson)
+		responseJson, err := json.Marshal(response)
+		if err != nil {
+			log.Println(err)
+			return
+		}
+
+		for _, playerConn := range server.sessions {
+			if playerConn == nil {
+				continue
+			}
+
+			server.listener.WriteTo(responseJson, playerConn.addr)
+			log.Println("Sent zone spawn to", playerConn.username)
 		}
 	}
 }
