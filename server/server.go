@@ -17,6 +17,8 @@ const (
 	playerUpdt
 	collected
 	death
+	start
+	message
 )
 
 var requestStringToEnum = map[string]requestType{
@@ -24,6 +26,8 @@ var requestStringToEnum = map[string]requestType{
 	"playerUpdate":  playerUpdt,
 	"coinCollected": collected,
 	"playerDeath":   death,
+	"gameStart":     start,
+	"chatMessage":   message,
 }
 
 type connectionRequest struct {
@@ -85,6 +89,11 @@ type gameOver struct {
 
 type playerDeath struct {
 	Username string `json:"username"`
+}
+
+type chatMessage struct {
+	Username string `json:"username"`
+	Message  string `json:"message"`
 }
 
 type Server struct {
@@ -156,6 +165,17 @@ func (server *Server) Serve() {
 			server.handleCoinCollected(requestData.(coinCollected))
 		case death:
 			server.handlePlayerDeath(requestData.(playerDeath))
+		case start:
+			if server.playerCount < 2 {
+				return
+			}
+
+			server.spawnPlayers()
+			server.spawnCoins()
+
+			go server.spawnZones()
+		case message:
+			server.handleMessage(requestData.(chatMessage))
 		}
 	}
 }
@@ -235,6 +255,22 @@ func (server *Server) buildRequest(data json.RawMessage, requestType requestType
 		}
 
 		return req
+	case start:
+		return nil
+	case message:
+		var rawData string
+		err := json.Unmarshal(data, &rawData)
+		if err != nil {
+			log.Println(err)
+		}
+
+		var req chatMessage
+		err = json.Unmarshal([]byte(rawData), &req)
+		if err != nil {
+			log.Println(err)
+		}
+
+		return req
 	}
 
 	return nil
@@ -279,19 +315,6 @@ func (server *Server) handleConnRequest(request connectionRequest, raddr net.Add
 		log.Println(err)
 		log.Println(errMsg)
 	}
-
-	if !connResponse.Success {
-		return
-	}
-
-	if server.playerCount < 2 {
-		return
-	}
-
-	server.spawnPlayers()
-	server.spawnCoins()
-
-	go server.spawnZones()
 }
 
 func (server *Server) handlePlayerUpdate(request playerUpdate) {
@@ -548,8 +571,30 @@ func (server *Server) spawnZones() {
 			}
 
 			server.listener.WriteTo(responseJson, playerConn.addr)
-			log.Println("Sent zone spawn to", playerConn.username)
 		}
+	}
+}
+
+func (server *Server) handleMessage(request chatMessage) {
+	chatMessageJson, err := json.Marshal(request)
+	if err != nil {
+		log.Println(err)
+	}
+
+	var response response
+	response.Type = "chatMessage"
+	response.Data = string(chatMessageJson)
+	responseJson, err := json.Marshal(response)
+	if err != nil {
+		log.Println(err)
+	}
+
+	for _, playerConn := range server.sessions {
+		if playerConn == nil {
+			continue
+		}
+
+		server.listener.WriteTo(responseJson, playerConn.addr)
 	}
 }
 
